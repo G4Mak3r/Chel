@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover"/>
+<meta name="theme-color" content="#101218"/>
+<title>GEOMETRY: EVOLUTION</title>
+<style>
+  html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#101218;color:#fff;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;touch-action:none}
+  canvas{display:block;width:100%;height:100%;touch-action:none}
+  #hud{position:fixed;inset:0;pointer-events:none}
+  .top{position:absolute;left:max(14px,env(safe-area-inset-left));right:max(14px,env(safe-area-inset-right));top:max(12px,env(safe-area-inset-top));display:flex;gap:10px;align-items:flex-start}
+  .card{background:rgba(20,23,31,.72);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,.10);border-radius:16px;padding:10px 12px;box-shadow:0 8px 30px rgba(0,0,0,.25)}
+  .stats{font-size:12px;line-height:1.45;min-width:150px}
+  .bar{height:7px;border-radius:99px;background:rgba(255,255,255,.1);overflow:hidden;margin-top:5px}
+  .fill{height:100%;width:50%;background:#fff}
+  .small{opacity:.68;font-size:11px}
+  #upgrade{display:none;position:fixed;inset:0;background:rgba(7,9,13,.72);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);align-items:center;justify-content:center;padding:20px;z-index:5}
+  #upgrade.open{display:flex}
+  .panel{width:min(680px,100%);background:#171b25;border:1px solid rgba(255,255,255,.12);border-radius:24px;padding:18px;box-shadow:0 24px 80px rgba(0,0,0,.5)}
+  .panel h2{margin:0 0 6px;font-size:24px}
+  .panel p{margin:0 0 14px;opacity:.7}
+  .choices{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+  button.choice{appearance:none;border:1px solid rgba(255,255,255,.13);background:#212736;color:#fff;border-radius:18px;padding:16px;text-align:left;font:inherit;min-height:150px}
+  button.choice:active{transform:scale(.985)}
+  .choice b{display:block;font-size:17px;margin-bottom:8px}
+  .choice span{font-size:13px;line-height:1.35;opacity:.72}
+  #hint{position:absolute;left:50%;transform:translateX(-50%);bottom:max(18px,env(safe-area-inset-bottom));font-size:12px;opacity:.55;text-align:center}
+  @media(max-width:620px){.choices{grid-template-columns:1fr}.panel{max-height:82vh;overflow:auto}.choice{min-height:100px!important}.top{gap:6px}.stats{min-width:125px;font-size:11px}}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud">
+  <div class="top">
+    <div class="card stats">
+      <div><b id="lvl">LVL 1</b> · <span id="mass">масса 12</span></div>
+      <div class="small" id="build">1× базовая пушка</div>
+      <div class="bar"><div class="fill" id="hpbar"></div></div>
+      <div class="bar"><div class="fill" id="xpbar"></div></div>
+    </div>
+  </div>
+  <div id="hint">Левая половина — движение · правая — прицел и огонь</div>
+</div>
+
+<div id="upgrade">
+  <div class="panel">
+    <h2>Эволюция</h2>
+    <p>Выбери модуль. Он реально изменит массу, отдачу и поведение машины.</p>
+    <div class="choices" id="choices"></div>
+  </div>
+</div>
+
+<script>
+(() => {
+const canvas = document.getElementById('game'), ctx = canvas.getContext('2d');
+let W=innerWidth,H=innerHeight,DPR=Math.min(devicePixelRatio||1,2);
+function resize(){W=innerWidth;H=innerHeight;DPR=Math.min(devicePixelRatio||1,2);canvas.width=W*DPR;canvas.height=H*DPR;ctx.setTransform(DPR,0,0,DPR,0,0)}
+addEventListener('resize',resize); resize();
+
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const rand=(a,b)=>a+Math.random()*(b-a);
+const len=(x,y)=>Math.hypot(x,y);
+const norm=(x,y)=>{const l=Math.hypot(x,y)||1;return [x/l,y/l]}
+
+const world={w:3200,h:3200};
+const bullets=[], enemies=[], particles=[];
+let cam={x:0,y:0};
+let paused=false;
+
+const player={
+  x:world.w/2,y:world.h/2,vx:0,vy:0,angle:0,av:0,r:24,
+  hp:100,maxHp:100,baseMass:10,mass:12,armor:0,
+  thrust:1850,drag:1.9,turnDrag:4.5,
+  level:1,xp:0,nextXp:22,
+  fireRate:3.2,fireTimer:0,bulletSpeed:620,bulletDamage:12,bulletMass:1.1,
+  recoil:1, barrels:[{a:0,len:30,width:10,power:1}],
+  mods:[], shield:0, ram:0
+};
+
+function recompute(){
+  let m=player.baseMass, hp=100, armor=0;
+  for(const mod of player.mods){
+    m += mod.mass||0; hp += mod.hp||0; armor += mod.armor||0;
+  }
+  player.mass=Math.max(4,m); player.maxHp=hp; player.hp=Math.min(player.hp,player.maxHp); player.armor=armor;
+}
+recompute();
+
+const upgrades=[
+ {name:'Twin Mount',desc:'Вторая передняя пушка. +масса, двойной импульс при залпе.',weight:3,apply(){
+   if(player.barrels.length<6) player.barrels.push({a:0.12,len:28,width:8,power:.78}), player.barrels[0].a=-.12;
+   player.mods.push({mass:3}); player.fireRate*=.92;
+ }},
+ {name:'Rear Gun',desc:'Ствол назад. Стрельба может работать как реактивный двигатель.',weight:2,apply(){
+   player.barrels.push({a:Math.PI,len:26,width:8,power:.7}); player.mods.push({mass:2});
+ }},
+ {name:'Heavy Cannon',desc:'Тяжелые снаряды, сильнейшая отдача и урон.',weight:3,apply(){
+   player.bulletMass*=1.7; player.bulletDamage*=1.55; player.bulletSpeed*=.88; player.fireRate*=.72; player.mods.push({mass:4});
+ }},
+ {name:'Lightweight Frame',desc:'Меньше массы: быстрее ускорение, но сильнее сносит отдачей.',weight:2,apply(){
+   player.baseMass=Math.max(5,player.baseMass-3); player.thrust*=1.12; player.maxHp=Math.max(60,player.maxHp-8);
+ }},
+ {name:'Armor Plates',desc:'Больше массы и прочности. Столкновения становятся выгоднее.',weight:3,apply(){
+   player.mods.push({mass:5,hp:35,armor:.12});
+ }},
+ {name:'Overpressure',desc:'+скорострельность, но отдача каждого выстрела возрастает.',weight:2,apply(){
+   player.fireRate*=1.35; player.recoil*=1.22; player.mods.push({mass:1});
+ }},
+ {name:'Long Barrel',desc:'Быстрее снаряды и дальше эффективная дистанция.',weight:2,apply(){
+   player.bulletSpeed*=1.28; player.bulletDamage*=1.08; player.mods.push({mass:1});
+ }},
+ {name:'Ram Spikes',desc:'Урон столкновением зависит от вашей массы и скорости.',weight:2,apply(){
+   player.ram+=.7; player.mods.push({mass:3,hp:15});
+ }},
+ {name:'Kinetic Shield',desc:'Часть входящего импульса поглощается. Щит медленно восстанавливается.',weight:1,apply(){
+   player.shield=Math.max(player.shield,40); player.mods.push({mass:4,hp:10});
+ }}
+];
+
+function weightedChoices(n=3){
+ const pool=[...upgrades], out=[];
+ while(out.length<n && pool.length){
+   const sum=pool.reduce((s,u)=>s+u.weight,0); let r=Math.random()*sum, idx=0;
+   for(;idx<pool.length;idx++){r-=pool[idx].weight;if(r<=0)break}
+   out.push(pool.splice(Math.min(idx,pool.length-1),1)[0]);
+ }
+ return out;
+}
+function openUpgrade(){
+ paused=true;
+ const box=document.getElementById('choices'); box.innerHTML='';
+ weightedChoices().forEach(u=>{
+   const b=document.createElement('button'); b.className='choice';
+   b.innerHTML=`<b>${u.name}</b><span>${u.desc}</span>`;
+   b.onclick=()=>{u.apply();recompute();document.getElementById('upgrade').classList.remove('open');paused=false};
+   box.appendChild(b);
+ });
+ document.getElementById('upgrade').classList.add('open');
+}
+
+function spawnEnemy(type=Math.random()<.7?'square':Math.random()<.75?'triangle':'pentagon'){
+ const a=Math.random()*Math.PI*2, d=rand(420,900);
+ let e={type,x:clamp(player.x+Math.cos(a)*d,60,world.w-60),y:clamp(player.y+Math.sin(a)*d,60,world.h-60),vx:0,vy:0,hit:0};
+ if(type==='square') Object.assign(e,{r:17,mass:7,hp:24,maxHp:24,speed:60,xp:5,damage:8,sides:4});
+ if(type==='triangle') Object.assign(e,{r:15,mass:5,hp:18,maxHp:18,speed:145,xp:7,damage:11,sides:3});
+ if(type==='pentagon') Object.assign(e,{r:28,mass:18,hp:75,maxHp:75,speed:48,xp:18,damage:18,sides:5});
+ enemies.push(e);
+}
+for(let i=0;i<55;i++) spawnEnemy(i<36?'square':i<49?'triangle':'pentagon');
+
+const input={mx:0,my:0,moveX:0,moveY:0,aimX:1,aimY:0,firing:false};
+const touches=new Map();
+
+function handleTouches(){
+ let move=null, aim=null;
+ for(const t of touches.values()){
+   if(t.startX<W*.5){ if(!move) move=t; } else { if(!aim) aim=t; }
+ }
+ if(move){
+   let dx=move.x-move.startX,dy=move.y-move.startY,l=Math.hypot(dx,dy),m=Math.min(1,l/70);
+   if(l>3){input.moveX=dx/l*m;input.moveY=dy/l*m}else input.moveX=input.moveY=0;
+ }else input.moveX=input.moveY=0;
+ if(aim){
+   let dx=aim.x-(player.x-cam.x),dy=aim.y-(player.y-cam.y),l=Math.hypot(dx,dy)||1;
+   input.aimX=dx/l;input.aimY=dy/l;input.firing=true;
+ }else input.firing=false;
+}
+canvas.addEventListener('pointerdown',e=>{
+ canvas.setPointerCapture(e.pointerId); touches.set(e.pointerId,{startX:e.clientX,startY:e.clientY,x:e.clientX,y:e.clientY}); handleTouches();
+});
+canvas.addEventListener('pointermove',e=>{let t=touches.get(e.pointerId);if(t){t.x=e.clientX;t.y=e.clientY;handleTouches()}});
+canvas.addEventListener('pointerup',e=>{touches.delete(e.pointerId);handleTouches()});
+canvas.addEventListener('pointercancel',e=>{touches.delete(e.pointerId);handleTouches()});
+
+addEventListener('keydown',e=>{
+ if(e.key==='w'||e.key==='ArrowUp')input.my=-1;
+ if(e.key==='s'||e.key==='ArrowDown')input.my=1;
+ if(e.key==='a'||e.key==='ArrowLeft')input.mx=-1;
+ if(e.key==='d'||e.key==='ArrowRight')input.mx=1;
+ if(e.code==='Space')input.firing=true;
+});
+addEventListener('keyup',e=>{
+ if(['w','s','ArrowUp','ArrowDown'].includes(e.key))input.my=0;
+ if(['a','d','ArrowLeft','ArrowRight'].includes(e.key))input.mx=0;
+ if(e.code==='Space')input.firing=false;
+});
+canvas.addEventListener('mousemove',e=>{
+ const px=player.x-cam.x,py=player.y-cam.y,dx=e.clientX-px,dy=e.clientY-py,l=Math.hypot(dx,dy)||1;
+ input.aimX=dx/l;input.aimY=dy/l;
+});
+canvas.addEventListener('mousedown',()=>input.firing=true); addEventListener('mouseup',()=>input.firing=false);
+
+function shoot(){
+ if(player.fireTimer>0)return;
+ player.fireTimer=1/player.fireRate;
+ for(const b of player.barrels){
+   const a=player.angle+b.a, ux=Math.cos(a),uy=Math.sin(a), power=b.power||1;
+   const sx=player.x+ux*(player.r+b.len*.72), sy=player.y+uy*(player.r+b.len*.72);
+   const shotMass=player.bulletMass*power;
+   bullets.push({x:sx,y:sy,vx:player.vx+ux*player.bulletSpeed,vy:player.vy+uy*player.bulletSpeed,r:4+shotMass*1.5,mass:shotMass,damage:player.bulletDamage*power,life:2.2});
+   const impulse=shotMass*player.bulletSpeed*player.recoil;
+   player.vx-=ux*impulse/player.mass;
+   player.vy-=uy*impulse/player.mass;
+   player.av += (-Math.sin(b.a))*impulse*0.0008/player.mass;
+   for(let i=0;i<4;i++) particles.push({x:sx,y:sy,vx:ux*rand(40,120)+rand(-50,50),vy:uy*rand(40,120)+rand(-50,50),life:.2,r:rand(1,3)});
+ }
+}
+
+function hurtPlayer(amount, ix=0,iy=0){
+ let dmg=amount*(1-player.armor);
+ if(player.shield>0){const absorb=Math.min(player.shield,dmg*.75);player.shield-=absorb;dmg-=absorb}
+ player.hp-=dmg;
+ player.vx+=ix/player.mass; player.vy+=iy/player.mass;
+ if(player.hp<=0) reset();
+}
+function addXp(v){
+ player.xp+=v;
+ while(player.xp>=player.nextXp){
+   player.xp-=player.nextXp;player.level++;player.nextXp=Math.floor(player.nextXp*1.28+7);openUpgrade();break;
+ }
+}
+function reset(){
+ player.x=world.w/2;player.y=world.h/2;player.vx=player.vy=player.av=0;player.angle=0;player.hp=player.maxHp;player.xp=0;
+ enemies.length=0;bullets.length=0;for(let i=0;i<55;i++)spawnEnemy();
+}
+
+function collideCircles(a,b){
+ const dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy),min=a.r+b.r;
+ if(d<=0||d>=min)return null;
+ const nx=dx/d,ny=dy/d,over=min-d;
+ const invA=1/(a.mass||1),invB=1/(b.mass||1),sum=invA+invB;
+ a.x-=nx*over*(invA/sum);a.y-=ny*over*(invA/sum);
+ b.x+=nx*over*(invB/sum);b.y+=ny*over*(invB/sum);
+ const rvx=b.vx-a.vx,rvy=b.vy-a.vy,vel=rvx*nx+rvy*ny;
+ if(vel<0){
+   const j=-(1.35)*vel/(invA+invB);
+   a.vx-=j*nx*invA;a.vy-=j*ny*invA;b.vx+=j*nx*invB;b.vy+=j*ny*invB;
+   return {impact:Math.abs(j),nx,ny};
+ }
+ return {impact:0,nx,ny};
+}
+
+function update(dt){
+ if(paused)return;
+ player.fireTimer=Math.max(0,player.fireTimer-dt);
+ player.shield=Math.min(player.shield>0?40:0,player.shield+dt*2.2);
+
+ let mx=input.moveX||input.mx,my=input.moveY||input.my,ml=Math.hypot(mx,my); if(ml>1){mx/=ml;my/=ml}
+ const accel=player.thrust/player.mass;
+ player.vx+=mx*accel*dt;player.vy+=my*accel*dt;
+ const damp=Math.exp(-player.drag*dt);player.vx*=damp;player.vy*=damp;
+ player.x=clamp(player.x+player.vx*dt,player.r,world.w-player.r);player.y=clamp(player.y+player.vy*dt,player.r,world.h-player.r);
+
+ const target=Math.atan2(input.aimY,input.aimX), da=Math.atan2(Math.sin(target-player.angle),Math.cos(target-player.angle));
+ player.av += da*(18/player.mass*8)*dt; player.av*=Math.exp(-player.turnDrag*dt); player.angle+=player.av*dt;
+ if(input.firing)shoot();
+
+ for(let i=bullets.length-1;i>=0;i--){
+   const b=bullets[i];b.x+=b.vx*dt;b.y+=b.vy*dt;b.life-=dt;
+   if(b.life<=0||b.x<0||b.y<0||b.x>world.w||b.y>world.h){bullets.splice(i,1);continue}
+   for(let j=enemies.length-1;j>=0;j--){
+     const e=enemies[j],dx=e.x-b.x,dy=e.y-b.y;
+     if(dx*dx+dy*dy<(e.r+b.r)*(e.r+b.r)){
+       e.hp-=b.damage;e.hit=.08;
+       const l=Math.hypot(b.vx,b.vy)||1,imp=b.mass*l;
+       e.vx+=b.vx/l*imp/e.mass;e.vy+=b.vy/l*imp/e.mass;
+       bullets.splice(i,1);
+       if(e.hp<=0){
+         addXp(e.xp);
+         for(let k=0;k<10;k++)particles.push({x:e.x,y:e.y,vx:rand(-150,150),vy:rand(-150,150),life:rand(.25,.65),r:rand(2,5)});
+         enemies.splice(j,1);setTimeout(()=>{if(enemies.length<65)spawnEnemy()},400);
+       }
+       break;
+     }
+   }
+ }
+
+ for(const e of enemies){
+   e.hit=Math.max(0,e.hit-dt);
+   const dx=player.x-e.x,dy=player.y-e.y,d=Math.hypot(dx,dy)||1;
+   let ax=0,ay=0;
+   if(e.type==='triangle'&&d<520){ax=dx/d*e.speed*3;ay=dy/d*e.speed*3}
+   else if(e.type==='pentagon'&&d<240){ax=-dx/d*e.speed*1.4;ay=-dy/d*e.speed*1.4}
+   else {ax=Math.sin((e.x+performance.now()*.02)*.004)*15;ay=Math.cos((e.y+performance.now()*.02)*.004)*15}
+   e.vx+=ax*dt;e.vy+=ay*dt;e.vx*=Math.exp(-1.8*dt);e.vy*=Math.exp(-1.8*dt);
+   e.x=clamp(e.x+e.vx*dt,e.r,world.w-e.r);e.y=clamp(e.y+e.vy*dt,e.r,world.h-e.r);
+   const c=collideCircles(player,e);
+   if(c&&c.impact>4){
+     const rel=Math.hypot(player.vx-e.vx,player.vy-e.vy);
+     hurtPlayer(Math.min(15,e.damage*rel/180),-c.nx*c.impact*.9,-c.ny*c.impact*.9);
+     if(player.ram>0){e.hp-=player.ram*player.mass*rel*.012;if(e.hp<=0){addXp(e.xp);e.hp=e.maxHp;e.x=rand(100,world.w-100);e.y=rand(100,world.h-100)}}
+   }
+ }
+
+ for(let i=particles.length-1;i>=0;i--){const p=particles[i];p.x+=p.vx*dt;p.y+=p.vy*dt;p.life-=dt;p.vx*=.96;p.vy*=.96;if(p.life<=0)particles.splice(i,1)}
+
+ cam.x+=(player.x-W/2-cam.x)*Math.min(1,dt*6);cam.y+=(player.y-H/2-cam.y)*Math.min(1,dt*6);
+ document.getElementById('lvl').textContent='LVL '+player.level;
+ document.getElementById('mass').textContent='масса '+player.mass.toFixed(1);
+ document.getElementById('build').textContent=player.barrels.length+'× пушки · отдача '+player.recoil.toFixed(2);
+ document.getElementById('hpbar').style.width=(100*player.hp/player.maxHp)+'%';
+ document.getElementById('xpbar').style.width=(100*player.xp/player.nextXp)+'%';
+}
+
+function poly(x,y,r,sides,rot,fill,stroke='#111'){
+ ctx.beginPath();
+ for(let i=0;i<sides;i++){const a=rot+i*Math.PI*2/sides,px=x+Math.cos(a)*r,py=y+Math.sin(a)*r;i?ctx.lineTo(px,py):ctx.moveTo(px,py)}
+ ctx.closePath();ctx.fillStyle=fill;ctx.fill();ctx.lineWidth=3;ctx.strokeStyle=stroke;ctx.stroke();
+}
+function draw(){
+ ctx.clearRect(0,0,W,H);ctx.fillStyle='#11151d';ctx.fillRect(0,0,W,H);
+ ctx.save();ctx.translate(-cam.x,-cam.y);
+ // grid
+ ctx.strokeStyle='rgba(255,255,255,.035)';ctx.lineWidth=1;
+ const gs=70;for(let x=Math.floor(cam.x/gs)*gs;x<cam.x+W+gs;x+=gs){ctx.beginPath();ctx.moveTo(x,cam.y);ctx.lineTo(x,cam.y+H);ctx.stroke()}
+ for(let y=Math.floor(cam.y/gs)*gs;y<cam.y+H+gs;y+=gs){ctx.beginPath();ctx.moveTo(cam.x,y);ctx.lineTo(cam.x+W,y);ctx.stroke()}
+ // world border
+ ctx.strokeStyle='rgba(255,255,255,.18)';ctx.lineWidth=4;ctx.strokeRect(0,0,world.w,world.h);
+
+ for(const p of particles){ctx.globalAlpha=clamp(p.life*2,0,1);ctx.fillStyle='#ffd166';ctx.beginPath();ctx.arc(p.x,p.y,p.r,0,Math.PI*2);ctx.fill()}ctx.globalAlpha=1;
+ for(const b of bullets){ctx.fillStyle='#f5f7ff';ctx.beginPath();ctx.arc(b.x,b.y,b.r,0,Math.PI*2);ctx.fill()}
+ for(const e of enemies){
+   const col=e.hit>0?'#ffffff':e.type==='square'?'#ffd166':e.type==='triangle'?'#ef476f':'#8ecae6';
+   poly(e.x,e.y,e.r,e.sides,(performance.now()*.00025)+(e.type==='triangle'?Math.PI/2:0),col,'#0b0d12');
+ }
+ // player barrels
+ ctx.save();ctx.translate(player.x,player.y);ctx.rotate(player.angle);
+ for(const b of player.barrels){ctx.save();ctx.rotate(b.a);ctx.fillStyle='#cbd5e1';ctx.strokeStyle='#0b0d12';ctx.lineWidth=3;ctx.beginPath();ctx.roundRect(10,-b.width/2,b.len,b.width,4);ctx.fill();ctx.stroke();ctx.restore()}
+ ctx.fillStyle='#5eead4';ctx.strokeStyle='#0b0d12';ctx.lineWidth=4;ctx.beginPath();ctx.arc(0,0,player.r,0,Math.PI*2);ctx.fill();ctx.stroke();
+ if(player.ram>0){for(let i=0;i<6;i++){const a=i*Math.PI/3;ctx.save();ctx.rotate(a);ctx.fillStyle='#94a3b8';ctx.beginPath();ctx.moveTo(player.r-2,-5);ctx.lineTo(player.r+12,0);ctx.lineTo(player.r-2,5);ctx.closePath();ctx.fill();ctx.stroke();ctx.restore()}}
+ ctx.restore();
+ if(player.shield>0){ctx.strokeStyle='rgba(125,211,252,.55)';ctx.lineWidth=3;ctx.beginPath();ctx.arc(player.x,player.y,player.r+9,0,Math.PI*2);ctx.stroke()}
+ ctx.restore();
+
+ // touch joysticks
+ for(const t of touches.values()){
+   ctx.globalAlpha=.35;ctx.strokeStyle='#fff';ctx.lineWidth=2;ctx.beginPath();ctx.arc(t.startX,t.startY,34,0,Math.PI*2);ctx.stroke();
+   ctx.beginPath();ctx.arc(t.x,t.y,16,0,Math.PI*2);ctx.stroke();ctx.globalAlpha=1;
+ }
+}
+
+let last=performance.now();
+function loop(now){const dt=Math.min(.033,(now-last)/1000);last=now;update(dt);draw();requestAnimationFrame(loop)}
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
